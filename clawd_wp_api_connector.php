@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Clawd WordPress API Connector
  * Description: إضافة تتيح الاتصال الخارجي الآمن مع Clawd لتبادل البيانات ونشر المقالات
- * Version: 1.0.0
+ * Version: 1.0.2
  * Author: Clawd Assistant
  */
 
@@ -285,7 +285,7 @@ class Clawd_WP_API_Connector {
             'timestamp' => current_time('mysql'),
             'site_url' => get_site_url(),
             'wp_version' => get_bloginfo('version'),
-            'plugin_version' => '1.0.0'
+            'plugin_version' => '1.0.2'
         );
     }
     
@@ -293,41 +293,31 @@ class Clawd_WP_API_Connector {
      * إضافة صورة مميزة للمقالة
      */
     private function set_featured_image($post_id, $image_url) {
-        require_once(ABSPATH . 'wp-admin/includes/media.php');
-        require_once(ABSPATH . 'wp-admin/includes/file.php');
-        require_once(ABSPATH . 'wp-admin/includes/image.php');
-        
-        // تحميل الصورة من الرابط
-        $upload_dir = wp_upload_dir();
-        $image_data = file_get_contents($image_url);
-        
-        if (!$image_data) {
-            return false;
+        // التحقق من توفر الدوال المطلوبة
+        if (!function_exists('media_sideload_image')) {
+            require_once(ABSPATH . 'wp-admin/includes/media.php');
+            require_once(ABSPATH . 'wp-admin/includes/file.php');
+            require_once(ABSPATH . 'wp-admin/includes/image.php');
         }
         
-        $filename = basename($image_url);
+        // محاولة تحميل الصورة مباشرة باستخدام وظيفة ووردبريس
+        $result = media_sideload_image($image_url, $post_id, '', 'src');
         
-        if (wp_mkdir_p($upload_dir['path'])) {
-            $file = $upload_dir['path'] . '/' . $filename;
-        } else {
-            $file = $upload_dir['basedir'] . '/' . $filename;
+        if (!is_wp_error($result)) {
+            // استرجاع معرف الصورة من المقالة بعد التحميل
+            $attachments = get_children(array(
+                'post_parent' => $post_id,
+                'post_type' => 'attachment',
+                'post_mime_type' => 'image'
+            ));
+            
+            if (!empty($attachments)) {
+                foreach ($attachments as $attachment_id => $attachment) {
+                    set_post_thumbnail($post_id, $attachment_id);
+                    break; // نعين أول صورة مرفقة كصورة مميزة
+                }
+            }
         }
-        
-        file_put_contents($file, $image_data);
-        
-        $wp_filetype = wp_check_filetype($filename, null);
-        $attachment = array(
-            'post_mime_type' => $wp_filetype['type'],
-            'post_title' => sanitize_file_name($filename),
-            'post_content' => '',
-            'post_status' => 'inherit'
-        );
-        
-        $attach_id = wp_insert_attachment($attachment, $file, $post_id);
-        $attach_data = wp_generate_attachment_metadata($attach_id, $file);
-        wp_update_attachment_metadata($attach_id, $attach_data);
-        
-        set_post_thumbnail($post_id, $attach_id);
     }
     
     /**
@@ -379,7 +369,7 @@ class Clawd_WP_API_Connector {
      */
     public function api_key_render() {
         $option = get_option('clawd_api_key');
-        echo '<input type="text" name="clawd_api_key" value="' . $option . '" size="50"/>';
+        echo '<input type="text" name="clawd_api_key" value="' . esc_attr($option) . '" size="50"/>';
         echo '<p class="description">هذا المفتاح سيستخدمه Clawd للاتصال بموقعك (أول إنشاء تلقائي إذا كان فارغًا)</p>';
     }
     
@@ -388,7 +378,7 @@ class Clawd_WP_API_Connector {
      */
     public function secret_key_render() {
         $option = get_option('clawd_secret_key');
-        echo '<input type="text" name="clawd_secret_key" value="' . $option . '" size="50"/>';
+        echo '<input type="text" name="clawd_secret_key" value="' . esc_attr($option) . '" size="50"/>';
         echo '<p class="description">هذا المفتاح السري يستخدم للتوقيع على الطلبات (أول إنشاء تلقائي إذا كان فارغًا)</p>';
     }
     
@@ -425,19 +415,13 @@ class Clawd_WP_API_Connector {
             <h2>تعليمات الاستخدام</h2>
             <p>للاتصال بموقعك من خلال Clawd، ستحتاج إلى:</p>
             <ol>
-                <li>مفتاح API: <code><?php echo get_option('clawd_api_key'); ?></code></li>
-                <li>المفتاح السري: <code><?php echo get_option('clawd_secret_key'); ?></code></li>
-                <li>رابط API: <code><?php echo get_site_url(); ?>/wp-json/clawd/v1/</code></li>
+                <li>مفتاح API: <code><?php echo esc_html(get_option('clawd_api_key')); ?></code></li>
+                <li>المفتاح السري: <code><?php echo esc_html(get_option('clawd_secret_key')); ?></code></li>
+                <li>رابط API: <code><?php echo esc_url(get_site_url()); ?>/wp-json/clawd/v1/</code></li>
             </ol>
             
-            <h3>اختبار الاتصال</h3>
-            <p>لทดสอบ الاتصال، استخدم الرابط التالي:</p>
-            <p><code><?php echo get_site_url(); ?>/wp-json/clawd/v1/test-connection</code></p>
-            <p>مع تضمين رؤوس HTTP التالية:</p>
-            <ul>
-                <li><code>X-Clawd-API-Key</code>: <?php echo get_option('clawd_api_key'); ?></li>
-                <li><code>X-Clawd-Signature</code>: HMAC-SHA256 للRequestBody باستخدام المفتاح السري</li>
-            </ul>
+            <h3>معلومات فنية</h3>
+            <p>الإصدار الحالي: 1.0.2 - استخدام دالة media_sideload_image المدمجة لووردبريس</p>
         </div>
         <?php
     }
