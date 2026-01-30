@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Clawd WordPress API Connector
  * Description: إضافة تتيح الاتصال الخارجي الآمن مع Clawd لتبادل البيانات ونشر المقالات
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: Clawd Assistant
  */
 
@@ -285,7 +285,7 @@ class Clawd_WP_API_Connector {
             'timestamp' => current_time('mysql'),
             'site_url' => get_site_url(),
             'wp_version' => get_bloginfo('version'),
-            'plugin_version' => '1.0.2'
+            'plugin_version' => '1.0.3'
         );
     }
     
@@ -300,24 +300,95 @@ class Clawd_WP_API_Connector {
             require_once(ABSPATH . 'wp-admin/includes/image.php');
         }
         
-        // محاولة تحميل الصورة مباشرة باستخدام وظيفة ووردبريس
+        // حاول استخدام media_sideload_image أولاً
         $result = media_sideload_image($image_url, $post_id, '', 'src');
         
-        if (!is_wp_error($result)) {
-            // استرجاع معرف الصورة من المقالة بعد التحميل
-            $attachments = get_children(array(
-                'post_parent' => $post_id,
-                'post_type' => 'attachment',
-                'post_mime_type' => 'image'
-            ));
-            
-            if (!empty($attachments)) {
-                foreach ($attachments as $attachment_id => $attachment) {
-                    set_post_thumbnail($post_id, $attachment_id);
-                    break; // نعين أول صورة مرفقة كصورة مميزة
-                }
-            }
+        // إذا فشل media_sideload_image أو عاد نص HTML (مما يعني أنه لم يتم التحميل)، نستخدم الطريقة اليدوية
+        if (is_wp_error($result) || strpos($result, '<img') !== false) {
+            // استخدام الطريقة اليدوية لتحميل الصورة
+            $this->manual_set_featured_image($post_id, $image_url);
         }
+    }
+    
+    /**
+     * تعيين الصورة البارزة بطريقة يدوية
+     */
+    private function manual_set_featured_image($post_id, $image_url) {
+        require_once(ABSPATH . 'wp-admin/includes/file.php');
+        require_once(ABSPATH . 'wp-admin/includes/media.php');
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
+        
+        // تحميل ملف الصورة من الرابط
+        $tmp_name = download_url($image_url);
+        
+        if (is_wp_error($tmp_name)) {
+            // حفظ الرابط كميتا بيانات في حال فشل التحميل
+            update_post_meta($post_id, 'external_featured_image_url', $image_url);
+            return false;
+        }
+        
+        // اسم الملف
+        $file_name = basename(parse_url($image_url, PHP_URL_PATH));
+        if (!$file_name) {
+            $file_name = md5($image_url) . '.jpg';
+        }
+        
+        // نقل الملف المؤقت إلى مجلد التحميلات
+        $file = array(
+            'name' => $file_name,
+            'type' => mime_content_type($tmp_name),
+            'tmp_name' => $tmp_name,
+            'error' => 0,
+            'size' => filesize($tmp_name),
+        );
+        
+        $overrides = array(
+            'test_form' => false,
+            'test_size' => true,
+            'test_upload' => true
+        );
+        
+        // التعامل مع تحميل الملف
+        $file_return = wp_handle_sideload($file, $overrides);
+        
+        if (isset($file_return['error']) || isset($file_return['upload_error_handler'])) {
+            @unlink($tmp_name);
+            update_post_meta($post_id, 'external_featured_image_url', $image_url);
+            return false;
+        }
+        
+        @unlink($tmp_name);
+        
+        $file_path = $file_return['file'];
+        
+        // إنشاء إدخال للوسائط
+        $attachment = array(
+            'post_mime_type' => $file_return['type'],
+            'post_title' => sanitize_file_name($file_name),
+            'post_content' => '',
+            'post_status' => 'inherit',
+            'guid' => $file_return['url']
+        );
+        
+        $attachment_id = wp_insert_attachment($attachment, $file_path, $post_id);
+        
+        if (!$attachment_id || is_wp_error($attachment_id)) {
+            update_post_meta($post_id, 'external_featured_image_url', $image_url);
+            return false;
+        }
+        
+        // إنشاء مصغرات الصورة
+        $attachment_data = wp_generate_attachment_metadata($attachment_id, $file_path);
+        wp_update_attachment_metadata($attachment_id, $attachment_data);
+        
+        // تعيين كصورة مميزة
+        $result = set_post_thumbnail($post_id, $attachment_id);
+        
+        if (!$result) {
+            update_post_meta($post_id, 'external_featured_image_url', $image_url);
+        }
+        
+        return $result;
     }
     
     /**
@@ -421,7 +492,7 @@ class Clawd_WP_API_Connector {
             </ol>
             
             <h3>معلومات فنية</h3>
-            <p>الإصدار الحالي: 1.0.2 - استخدام دالة media_sideload_image المدمجة لووردبريس</p>
+            <p>الإصدار الحالي: 1.0.3 - تحسينات في تعيين الصور البارزة</p>
         </div>
         <?php
     }
